@@ -1,0 +1,212 @@
+# ==========================================
+# STEP 1 & 2: SIMULATING THE EDGE ENTRY POINT
+# ==========================================
+# Docker Desktop doesn't have private subnets, so we mimic a private Ingress
+# by routing public localhost:8080 through this proxy to the internal gateway.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-public-proxy
+  namespace: istio-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge-public-proxy
+  template:
+    metadata:
+      labels:
+        app: edge-public-proxy
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+      volumes:
+      - name: config
+        configMap:
+          name: edge-proxy-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-proxy-config
+  namespace: istio-system
+data:
+  nginx.conf: |
+    events {}
+    http {
+        server {
+            listen 80;
+            location / {
+                # Passes traffic across the simulated boundary to the internal gateway service
+                proxy_pass http://cluster.local;
+                proxy_set_header Host $host;
+            }
+        }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: public-edge-entry
+  namespace: istio-system
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30080
+  selector:
+    app: edge-public-proxy
+
+---
+# ==========================================
+# STEP 2 & 3: THE PRIVATE INGRESS GATEWAY
+# ==========================================
+# This acts as our internal gateway inside our private space.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-private-ingressgateway
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      app: my-private-ingressgateway
+  template:
+    metadata:
+      labels:
+        app: my-private-ingressgateway
+        istio: ingressgateway
+    spec:
+      containers:
+      - name: istio-proxy
+        image: gcr.io/istio-release/proxyv2:1.24.0 # Match this to your installed istioctl version
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-private-ingressgateway
+  namespace: istio-system
+spec:
+  type: ClusterIP # Keeps it private inside the cluster network
+  ports:
+  - name: http2
+    port: 80
+    targetPort: 8080
+  selector:
+    app: my-private-ingressgateway
+
+---
+# ==========================================
+# APPLICATION ZONE (TARGET SERVICES)
+# ==========================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-apps
+  labels:
+    # STEP 5: This label triggers automatic Istio sidecar proxy injection
+    istio-injection: enabled
+---
+# STEP 3: Istio Gateway & Routing Configuration
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: app-gateway
+  namespace: secure-apps
+spec:
+  selector:
+    istio: ingressgateway # Binds to our private ingress gateway instances
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: app-routes
+  namespace: secure-apps
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - app-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /api
+    route:
+    - destination:
+        host: backend-service.secure-apps.svc.cluster.local
+        port:
+          number: 80
+
+---
+# STEP 4: KUBERNETES NETWORK ACCESS POLICY
+# Explicitly isolates the secure-apps namespace, permitting incoming 
+# connections ONLY from the istio-system namespace (where our gateway lives).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-only-istio-ingress
+  namespace: secure-apps
+spec:
+  podSelector: {} # Appils to ALL pods in this namespace
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: istio-system
+
+---
+# STEP 3, 5 & 6: TARGET SERVICE & APPLICATION POD
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: secure-apps
+spec:
+  ports:
+  - port: 80
+    targetPort: 5678
+  selector:
+    app: secure-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-api-deployment
+  namespace: secure-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: secure-api
+  template:
+    metadata:
+      labels:
+        app: secure-api
+    spec:
+      containers:
+      - name: my-app-container # STEP 6: Target app container listening locally
+        image: hashicorp/http-echo:latest
+        args:
+        - "-text=Success! Hit the container via Private Mesh Architecture."
+        ports:
+        - containerPort: 5678
+
