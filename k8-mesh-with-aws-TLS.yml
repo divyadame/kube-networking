@@ -1,0 +1,78 @@
+# ==========================================
+# STEP 1 & 2: AWS NLB WITH ACM TLS TERMINATION
+# ==========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: istio-private-ingressgateway
+  namespace: istio-system
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+    
+    # === NEW ACM TLS ANNOTATIONS ===
+    # 1. Specify the ports to listen on for TLS traffic
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    # 2. Inject your exact AWS Certificate Manager ARN here
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:us-east-1:123456789012:certificate/your-uuid-here"
+    # 3. Explicit backend protocol telling NLB to drop TLS and talk plaintext to Istio
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+spec:
+  type: LoadBalancer
+  selector:
+    app: istio-private-ingressgateway
+    istio: ingressgateway
+  ports:
+  - name: status-port
+    port: 15021
+    targetPort: 15021
+  - name: https-terminated-to-http # Public hits 443 -> NLB decrypts -> hits Istio on port 8080
+    port: 443
+    targetPort: 8080 
+
+---
+# ==========================================
+# STEP 3: ISTIO GATEWAY CONFIGURATION
+# ==========================================
+# Because AWS NLB terminates TLS at the edge, Istio's Gateway resource 
+# processes standard HTTP traffic internally on port 8080.
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: aws-app-gateway
+  namespace: secure-apps
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 8080 # Matches the targetPort exposed by the service
+      name: http
+      protocol: HTTP
+    hosts:
+    - "api.yourcompany.internal" # Your Route 53 domain target
+
+---
+# STEP 3: VIRTUAL SERVICE ROUTING RULE
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: aws-app-routes
+  namespace: secure-apps
+spec:
+  hosts:
+  - "api.yourcompany.internal"
+  gateways:
+  - aws-app-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /api
+    route:
+    - destination:
+        host: backend-service.secure-apps.svc.cluster.local
+        port:
+          number: 80
+

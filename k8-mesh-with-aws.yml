@@ -1,0 +1,167 @@
+# ==========================================
+# STEP 2: THE AWS INTERNAL NLB + ISTIO GATEWAY
+# ==========================================
+# This provisions a completely private AWS Network Load Balancer (NLB)
+# that only accepts traffic from inside your VPC or connected networks.
+apiVersion: v1
+kind: Service
+metadata:
+  name: istio-private-ingressgateway
+  namespace: istio-system
+  annotations:
+    # 1. Instructs AWS Load Balancer Controller to handle this service
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    # 2. Deploys an INTERNAL load balancer (binds to private subnets)
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+    # 3. Direct Routing: Bypasses kube-proxy, sends NLB traffic straight to Pod IPs
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    # 4. Uses native AWS VPC network security groups for protection
+    service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app: istio-private-ingressgateway
+    istio: ingressgateway
+  ports:
+  - name: status-port
+    port: 15021
+    targetPort: 15021
+  - name: http2
+    port: 80
+    targetPort: 8080
+  - name: https
+    port: 443
+    targetPort: 8443
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: istio-private-ingressgateway
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      app: istio-private-ingressgateway
+      istio: ingressgateway
+  template:
+    metadata:
+      labels:
+        app: istio-private-ingressgateway
+        istio: ingressgateway
+    spec:
+      containers:
+      - name: istio-proxy
+        image: gcr.io/istio-release/proxyv2:1.24.0 # Replace with your exact istioctl version
+        ports:
+        - containerPort: 15021
+        - containerPort: 8080
+        - containerPort: 8443
+
+---
+# ==========================================
+# APPLICATION ZONE (TARGET SERVICES)
+# ==========================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-apps
+  labels:
+    # STEP 5: This label triggers automatic Istio sidecar proxy injection
+    istio-injection: enabled
+
+---
+# STEP 3: Istio Gateway & Routing Configuration
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: aws-app-gateway
+  namespace: secure-apps
+spec:
+  selector:
+    istio: ingressgateway # Binds to our newly deployed private ingress pod
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: aws-app-routes
+  namespace: secure-apps
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - aws-app-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /api
+    route:
+    - destination:
+        host: backend-service.secure-apps.svc.cluster.local
+        port:
+          number: 80
+
+---
+# STEP 4: KUBERNETES NETWORK ACCESS POLICY
+# Isolates pods inside the secure-apps namespace. 
+# Only drops or permits connections coming directly from the istio-system namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-only-istio-ingress
+  namespace: secure-apps
+spec:
+  podSelector: {} # Targets all pods in this namespace
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: istio-system
+
+---
+# STEP 3, 5 & 6: TARGET SERVICE & APPLICATION POD
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: secure-apps
+spec:
+  ports:
+  - port: 80
+    targetPort: 5678
+  selector:
+    app: secure-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-api-deployment
+  namespace: secure-apps
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: secure-api
+  template:
+    metadata:
+      labels:
+        app: secure-api
+    spec:
+      containers:
+      - name: my-app-container # STEP 6: Target app container listening locally
+        image: hashicorp/http-echo:latest
+        args:
+        - "-text=Success! Traffic processed through private AWS NLB and Istio Mesh."
+        ports:
+        - containerPort: 5678
+
