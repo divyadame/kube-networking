@@ -1,6 +1,6 @@
 
 Docker-Desktop - Networking MaP
-Component Breakdown
+Component Breakdown -
 • Edge Entry Point: Nginx accepts external traffic and bridges the public-to-private boundary by forwarding requests to the inner cluster network.
 • Private Ingress: An isolated Istio ingress gateway that listens only to internal cluster communication. It uses app-gateway and app-routes to filter traffic for the /api prefix.
 • Network Isolation: The allow-only-istio-ingress policy blocks all traffic to the secure-apps namespace unless it originates explicitly from istio-system.
