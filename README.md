@@ -57,7 +57,7 @@ Component Breakdown
 • Private Ingress: An isolated Istio ingress gateway that listens only to internal cluster communication. It uses app-gateway and app-routes to filter traffic for the /api prefix.
 • Network Isolation: The allow-only-istio-ingress policy blocks all traffic to the secure-apps namespace unless it originates explicitly from istio-system.
 • Mesh Sidecar: The destination pod intercepts incoming traffic via an injected Envoy proxy sidecar before delivering the payload to your application container on port 5678. 
-<img width="914" height="1782" alt="image" src="https://github.com/user-attachments/assets/a9631198-c9bf-43bd-ace3-ad5c29455f95" />
+
 
 
 AWS NETWORKING MAP
@@ -171,6 +171,6 @@ Infrastructure Differences & Flow Highlights
 • AWS Native Bypass: The AWS Load Balancer Controller targets your network interface directly using target-type: "ip". Traffic completely skips the standard Kubernetes node-routing layers (kube-proxy), streaming directly from the AWS NLB into the Istio ingress pods.
 • Security Isolation: AWS security groups protect the entry path at the network perimeter, while the Kubernetes NetworkPolicy stops cross-namespace lateral movement inside the cluster.
 • Load Balancing: Traffic routing scales across two target pod replicas under the secure-apps namespace via Istio's service discovery mechanisms.
-<img width="925" height="1853" alt="image" src="https://github.com/user-attachments/assets/57237a41-6f4f-4b83-b686-32542da9b5a1" />
+
 
 
